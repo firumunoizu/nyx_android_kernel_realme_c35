@@ -11,19 +11,17 @@ jobs:
       CONFIGS: ${{ steps.generate-matrix.outputs.CONFIGS }}
       BUILD_DATE: ${{ steps.generate-builddate.outputs.BUILDDATE }}
     steps:
-      # This action checks-out your CONFIGSitory under $GITHUB_WORKSPACE, so your workflow can access it.
       - name: 😄 Checkout
         uses: actions/checkout@v4
 
-      # Match the configuration files in the CONFIGS directory, read the contents and merge them into an array.
+      # Only configs with KernelSU disabled
       - name: 😆 Generate Matrix
         id: generate-matrix
         run: |
           echo "CONFIGS<<EOF" >> $GITHUB_OUTPUT
-          jq -s '[.[][]]' build/configs/*.config.json >> $GITHUB_OUTPUT
+          jq -s '[.[][]] | map(select((.KernelSU.enable // false) != true))' build/configs/*.config.json >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # Set compile time.
       - name: ⏰ Set builddate
         id: generate-builddate
         run: echo "BUILDDATE=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
@@ -39,38 +37,28 @@ jobs:
       matrix:
         CONFIG: ${{ fromJSON(needs.Read-configuration.outputs.CONFIGS) }}
     env:
-      # Basic configuration
       WORKSPACE: ${{ github.workspace }}
       BUILD_DATE: "${{ needs.Read-configuration.outputs.BUILD_DATE }}"
 
-      # Kernel source configuration
       KERNEL_NAME: ${{ matrix.CONFIG.kernelSource.name }}
       KERNEL_REPO: ${{ matrix.CONFIG.kernelSource.repo }}
       KERNEL_BRANCH: ${{ matrix.CONFIG.kernelSource.branch }}
       KERNEL_DEVICE: ${{ matrix.CONFIG.kernelSource.device }}
       KERNEL_DEFCONFIG_PATH: ${{ matrix.CONFIG.kernelSource.defconfig }}
 
-      # Whether to use ccache to speed up compilation
       ENABLE_CCACHE: ${{ matrix.CONFIG.enableCcache }}
 
-      # Whether to enable KernelSU
-      ENABLE_KERNELSU: ${{ matrix.CONFIG.KernelSU.enable }}
-
-      # Set output & ccache directory
       OUT_DIR: "${{ github.workspace }}/out"
       CCACHE_DIR: "${{ github.workspace }}/ccache"
     steps:
-      # Set swap space
       - name: 📐 Set swap to 16G
         uses: pierotofy/set-swap-space@master
         with:
           swap-size-gb: 16
 
-      # This action checks-out your CONFIGSitory under $GITHUB_WORKSPACE, so your workflow can access it.
       - name: 😄 Checkout
         uses: actions/checkout@v4
 
-      # Install prerequisites for Ubuntu
       - name: ⭐ Install prerequisites
         run: |
           sudo apt-get update
@@ -82,18 +70,12 @@ jobs:
           sudo apt-get install -y pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl 
           sudo apt-get install -y zip unzip tar gzip bzip2 rar unrar llvm g++-multilib bison gperf zlib1g-dev automake
 
-      # Initialize ccache
       - name: 🚄 Setup ccache
         if: ${{ env.ENABLE_CCACHE == 'true' }}
         id: hash
         run: |
-          # Create output directory
           mkdir -p ${{ env.OUT_DIR }}
-
-          # Initialize ccache
           ccache -o compression=false -o cache_dir=${{ env.CCACHE_DIR }}
-
-          # Generate configuration's hash
           echo $(echo -n '${{ toJSON(matrix.config) }}' | openssl dgst -sha1 | awk '{print $2}')
           echo "HASH=$(echo -n '${{ toJSON(matrix.config) }}' | openssl dgst -sha1 | awk '{print $2}')" >> $GITHUB_OUTPUT
 
@@ -111,7 +93,7 @@ jobs:
             cache-${{ env.KERNEL_NAME }}-${{env.HASH}}-${{ env.BUILD_DATE }}
             cache-${{ env.KERNEL_NAME }}-${{env.HASH}}-
             cache-${{ env.KERNEL_NAME }}-
-            
+
       - name: 💫 Get toolchains
         env:
           toolchains: "${{ toJSON(matrix.CONFIG.toolchains) }}"
@@ -123,17 +105,13 @@ jobs:
             toolchain=$(echo $toolchains | jq -r ".[$i]")
 
             toolchain_name=$(echo $toolchain | jq -r ".name")
-            
-            # From archive
+
             if echo $toolchain | jq -e 'has("url")' > /dev/null; then
-              # If from archive
               toolchain_url=$(echo $toolchain | jq -r ".url")
               mkdir -p "$toolchain_name"
 
-              # Download archive
               wget "$toolchain_url"
 
-              # Get filename
               filename="${toolchain_url##*/}"
               case "$filename" in
                 *.zip)
@@ -152,12 +130,10 @@ jobs:
                   echo "unknown file type: $filename"
                   ;;
               esac
-              # Delete file to avoid duplicate name conflicts 
               rm $filename
 
               echo "🤔 Download $toolchain_name => ($toolchain_url)"
             else
-              # If from git
               toolchain_repo=$(echo $toolchain | jq -r ".repo")
               toolchain_branch=$(echo $toolchain | jq -r ".branch")
               git clone --recursive --depth=1 -j $(nproc) --branch $toolchain_branch $toolchain_repo $toolchain_name
@@ -208,48 +184,6 @@ jobs:
 
           echo "🤔 $args"
 
-      - name: 😋 Setup KernelSU
-        working-directory: ${{ github.workspace }}
-        env:
-          PARAMS: "${{ toJSON(matrix.CONFIG.KernelSU) }}"
-          ARCH: ${{ steps.generate-args.outputs.ARCH }}
-        if: ${{ env.ENABLE_KERNELSU == 'true' }}
-        run: |
-          if echo -n '${{ env.PARAMS }}' | jq -e 'has("custom")' > /dev/null; then
-
-            CUSTOM_KERNELSU=$(echo -n '${{ env.PARAMS }}' | jq -r ".custom")
-            KERNELSU_USER=$(echo $CUSTOM_KERNELSU | jq -r ".user")
-            KERNELSU_BRANCH=$(echo $CUSTOM_KERNELSU | jq -r ".branch")
-            KERNELSU_REPO=$(echo $CUSTOM_KERNELSU | jq -r ".repo")
-
-            # Delete old KernelSU
-            if [ -d "./KernelSU" ]; then
-              rm -rf "./KernelSU"
-            fi
-            if [ -d "./drivers/kernelsu" ]; then
-              rm -rf "./drivers/kernelsu"
-            fi
-
-            # Apply new KernelSU patches
-            curl -LSs "https://raw.githubusercontent.com/$KERNELSU_USER/$KERNELSU_REPO/$KERNELSU_BRANCH/kernel/setup.sh" | bash -s $KERNELSU_BRANCH
-
-          else
-        
-          # Delete old KernelSU
-          if [ -d "./KernelSU" ]; then
-            rm -rf "./KernelSU"
-          fi
-          if [ -d "./drivers/kernelsu" ]; then
-            rm -rf "./drivers/kernelsu"
-          fi
-
-          # Apply new KernelSU patches
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-
-          fi
-
-          cat arch/${{ env.ARCH }}/configs/${{ env.KERNEL_DEFCONFIG_PATH }}
-
       - name: 👍 Start building the kernel
         working-directory: ${{ github.workspace }}
         env:
@@ -260,7 +194,6 @@ jobs:
           export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
           make ${{ env.ARGS }} ${{ env.KERNEL_DEFCONFIG_PATH }}
           make ${{ env.ARGS }}
-          # tree ${{ env.OUT_DIR }}
 
       - name: 😌 Start patching boot.img
         working-directory: ${{ github.workspace }}
